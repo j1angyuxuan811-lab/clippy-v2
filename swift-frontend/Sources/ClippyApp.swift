@@ -3,6 +3,46 @@ import WebKit
 import Cocoa
 import Foundation
 
+// ── JS Bridge: handles clipboard operations from WebView ──
+class ClippyBridge: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let dict = message.body as? [String: Any],
+              let action = dict["action"] as? String else { return }
+
+        if action == "copyImage" {
+            guard let path = dict["path"] as? String else {
+                print("❌ copyImage: missing path")
+                return
+            }
+            copyImageToClipboard(path: path)
+        }
+    }
+
+    private func copyImageToClipboard(path: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        // Try reading the image file
+        let url = URL(fileURLWithPath: path)
+        guard let image = NSImage(contentsOf: url) else {
+            print("❌ Failed to load image: \(path)")
+            return
+        }
+
+        pasteboard.writeObjects([image])
+        print("📋 Image copied to clipboard: \(path)")
+
+        // Simulate Cmd+V to paste into the active app
+        let src = CGEventSource(stateID: .combinedSessionState)
+        let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true) // V
+        cmdDown?.flags = .maskCommand
+        let cmdUp = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false)
+        cmdUp?.flags = .maskCommand
+        cmdDown?.post(tap: .cghidEventTap)
+        cmdUp?.post(tap: .cghidEventTap)
+    }
+}
+
 // ── App Delegate ──
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
@@ -222,6 +262,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Content
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        config.userContentController.add(ClippyBridge(), name: "ClippyBridge")
 
         let webView = WKWebView(frame: panel!.contentView!.bounds, configuration: config)
         webView.autoresizingMask = [.width, .height]

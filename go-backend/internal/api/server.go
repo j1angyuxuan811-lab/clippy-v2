@@ -190,6 +190,8 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "toggled"})
 }
 
+// handleCopy - returns clip data. For images, also returns the full image path
+// so Swift can read it and put it on the system clipboard via NSPasteboard.
 func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(mux.Vars(r)["id"])
 	item, err := s.store.Get(id)
@@ -197,7 +199,24 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 404)
 		return
 	}
-	json.NewEncoder(w).Encode(item)
+
+	// For image clips, return the absolute image file path
+	response := map[string]interface{}{
+		"id":           item.ID,
+		"content":      item.Content,
+		"content_type": item.ContentType,
+		"image_path":   item.ImagePath,
+		"pinned":       item.IsPinned,
+		"created_at":   item.CreatedAt,
+	}
+
+	if item.ContentType == "image" && item.ImagePath != "" {
+		absPath := filepath.Join(s.imagesDir, filepath.Base(item.ImagePath))
+		response["image_abs_path"] = absPath
+		log.Printf("📋 Copy requested for image: %s", absPath)
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {

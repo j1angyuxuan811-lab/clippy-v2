@@ -363,17 +363,45 @@ async function fetchClips() {
 
 async function pasteClip(id) {
   try {
-    await fetch(`${API}/api/clips/${id}/copy`, { method: 'POST' });
+    const res = await fetch(`${API}/api/clips/${id}/copy`, { method: 'POST' });
+    const clip = await res.json();
+    if (clip.content_type === 'image' && clip.image_abs_path) {
+      // Image: tell Swift to copy image to system clipboard via bridge
+      window.webkit?.messageHandlers?.ClippyBridge?.postMessage({
+        action: 'copyImage',
+        path: clip.image_abs_path
+      });
+    } else {
+      // Text: write to clipboard
+      await navigator.clipboard.writeText(clip.content);
+    }
     window.close?.();
   } catch (e) {
-    const clip = clips.find(c => c.id === id);
-    if (clip) { await navigator.clipboard.writeText(clip.content); }
+    const clip = clips.find(c => c.id == id);
+    if (clip && clip.content_type !== 'image') {
+      await navigator.clipboard.writeText(clip.content);
+    }
   }
 }
 
 async function copyClip(id) {
-  const clip = clips.find(c => c.id === id);
-  if (clip) await navigator.clipboard.writeText(clip.content);
+  try {
+    const res = await fetch(`${API}/api/clips/${id}/copy`, { method: 'POST' });
+    const clip = await res.json();
+    if (clip.content_type === 'image' && clip.image_abs_path) {
+      window.webkit?.messageHandlers?.ClippyBridge?.postMessage({
+        action: 'copyImage',
+        path: clip.image_abs_path
+      });
+    } else {
+      await navigator.clipboard.writeText(clip.content);
+    }
+  } catch (e) {
+    const clip = clips.find(c => c.id == id);
+    if (clip && clip.content_type !== 'image') {
+      await navigator.clipboard.writeText(clip.content);
+    }
+  }
 }
 
 async function togglePin(id, pinned) {
