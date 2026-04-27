@@ -16,12 +16,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let backendURL: URL = {
         let appBundleURL = Bundle.main.bundleURL
-        return appBundleURL.appendingPathComponent("Contents/MacOS/clippy-backend")
+        return appBundleURL.appendingPathComponent("Contents/Resources/clippy-server")
     }()
 
     private var uiDir: URL {
-        if let bundled = Bundle.main.url(forResource: "ui-prototype", withExtension: nil) {
-            return bundled
+        if let resourcesPath = Bundle.main.resourcePath {
+            return URL(fileURLWithPath: resourcesPath)
         }
         return URL(fileURLWithPath: "/Users/qq/workspace/clippy-v2/ui-prototype")
     }
@@ -54,7 +54,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func startBackend() {
         let process = Process()
         process.executableURL = backendURL
-        process.arguments = ["-addr", ":5100", "-db", dbPath, "-static", uiDir.path]
+
+        // Fixed data directory: ~/Library/Application Support/Clippy/
+        let appSupportDir = NSHomeDirectory() + "/Library/Application Support/Clippy"
+        let imagesDir = appSupportDir + "/images"
+        try? FileManager.default.createDirectory(atPath: imagesDir, withIntermediateDirectories: true)
+
+        process.arguments = [
+            "-port", "5100",
+            "-data", appSupportDir,
+            "-images", imagesDir,
+            "-static", uiDir.path
+        ]
 
         let logDir = FileManager.default.temporaryDirectory
         let stdoutLog = logDir.appendingPathComponent("clippy-backend-stdout.log")

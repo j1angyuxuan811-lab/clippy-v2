@@ -30,3 +30,5 @@ Thumbs.db
 
 # Logs
 *.log
+*.db-shm
+*.db-wal

@@ -14,10 +14,11 @@ import (
 )
 
 type Monitor struct {
-	store       *db.Store
-	interval    time.Duration
-	lastHash    string
-	imagesDir   string
+	store         *db.Store
+	interval      time.Duration
+	lastTextHash  string
+	lastImageHash string
+	imagesDir     string
 }
 
 func New(store *db.Store, imagesDir string) *Monitor {
@@ -31,7 +32,7 @@ func New(store *db.Store, imagesDir string) *Monitor {
 
 func (m *Monitor) Start() {
 	log.Println("📋 Clipboard monitor started")
-	m.check() // first scan
+	m.check()
 	for {
 		time.Sleep(m.interval)
 		m.check()
@@ -39,11 +40,9 @@ func (m *Monitor) Start() {
 }
 
 func (m *Monitor) check() {
-	// 1. Try image first (more specific)
 	if m.checkImage() {
 		return
 	}
-	// 2. Try text
 	m.checkText()
 }
 
@@ -58,73 +57,81 @@ func (m *Monitor) checkText() {
 	}
 
 	hash := hashStr(text)
-	if hash == m.lastHash {
+	if hash == m.lastTextHash {
 		return
 	}
-	m.lastHash = hash
+	m.lastTextHash = hash
+	m.lastImageHash = "" // reset image hash when text changes
 	m.store.Create(text, "text", "")
 }
 
 func (m *Monitor) checkImage() bool {
-	// Check if clipboard has image data
-	script := `try
-	tell application "System Events"
-		set cbInfo to the clipboard info
-		repeat with itemInfo in cbInfo
-			if itemInfo contains "TIFF" or itemInfo contains "PNGf" or itemInfo contains "GIFf" or itemInfo contains "JPEG" then
-				return "yes"
-			end if
-		end repeat
-	end try
-	return "no"
-end try`
-	out, err := exec.Command("osascript", "-e", script).Output()
+	// Check clipboard info for image types
+	infoOut, err := exec.Command("osascript", "-e", "clipboard info as text").Output()
 	if err != nil {
+		log.Printf("⚠️ clipboard info error: %v", err)
 		return false
 	}
-	if strings.TrimSpace(string(out)) != "yes" {
+	info := string(infoOut)
+	log.Printf("🔍 clipboard info: %s", info[:min(60, len(info))])
+
+	hasImage := strings.Contains(info, "PNGf") ||
+		strings.Contains(info, "TIFF") ||
+		strings.Contains(info, "JPEG") ||
+		strings.Contains(info, "GIFf") ||
+		strings.Contains(info, "8BPS")
+	if !hasImage {
+		log.Printf("🔍 no image in clipboard")
 		return false
 	}
 
-	// Export image as PNG using osascript
+	log.Printf("🔍 image detected, exporting...")
+
+	// Export as PNG
 	tmpFile := filepath.Join(m.imagesDir, fmt.Sprintf("clip_%d.png", time.Now().UnixNano()))
-	exportScript := fmt.Sprintf(`tell application "System Events"
-	try
-		set theData to the clipboard as «class PNGf»
-		set f to open for access POSIX file "%s" with write permission
-		set eof f to 0
-		write theData to f
-		close access f
-		return "ok"
-	on error
-		return "fail"
-	end try
-end tell`, tmpFile)
+	exportScript := fmt.Sprintf(`set theData to the clipboard as «class PNGf»
+set f to open for access POSIX file "%s" with write permission
+set eof f to 0
+write theData to f
+close access f`, tmpFile)
 
-	out, err = exec.Command("osascript", "-e", exportScript).Output()
-	if err != nil || strings.TrimSpace(string(out)) != "ok" {
+	out, err := exec.Command("osascript", "-e", exportScript).CombinedOutput()
+	log.Printf("🔍 export result: err=%v, out=%s", err, string(out))
+	if err != nil || len(out) > 0 {
+		// Fallback to TIFF
 		_ = os.Remove(tmpFile)
-		return false
+		tmpFile = filepath.Join(m.imagesDir, fmt.Sprintf("clip_%d.tiff", time.Now().UnixNano()))
+		exportScript = fmt.Sprintf(`set theData to the clipboard as TIFF picture
+set f to open for access POSIX file "%s" with write permission
+set eof f to 0
+write theData to f
+close access f`, tmpFile)
+		out, err = exec.Command("osascript", "-e", exportScript).CombinedOutput()
+		if err != nil || len(out) > 0 {
+			_ = os.Remove(tmpFile)
+			return false
+		}
 	}
 
 	// Check file size (max 5MB)
-	info, err := os.Stat(tmpFile)
-	if err != nil || info.Size() > 5*1024*1024 || info.Size() == 0 {
+	finfo, err := os.Stat(tmpFile)
+	if err != nil || finfo.Size() > 5*1024*1024 || finfo.Size() == 0 {
 		_ = os.Remove(tmpFile)
 		return false
 	}
 
-	// Dedup by hash of file content
+	// Dedup by content hash — only save if different from last image
 	hash := hashFile(tmpFile)
-	if hash == m.lastHash {
+	if hash == m.lastImageHash {
 		_ = os.Remove(tmpFile)
 		return true
 	}
-	m.lastHash = hash
+	m.lastImageHash = hash
+	m.lastTextHash = "" // reset text hash when image changes
 
 	relPath := filepath.Join("data", "images", filepath.Base(tmpFile))
 	m.store.Create("[图片]", "image", relPath)
-	log.Printf("🖼️ Image captured: %s (%.1f KB)", filepath.Base(tmpFile), float64(info.Size())/1024)
+	log.Printf("🖼️ Image captured: %s (%.1f KB)", filepath.Base(tmpFile), float64(finfo.Size())/1024)
 	return true
 }
 
