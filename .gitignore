@@ -4,8 +4,10 @@
 *.so
 *.dylib
 build/
+bin/
 *.app/
 *.db
+*.zip
 
 # Go
 go-backend/clippy-backend
