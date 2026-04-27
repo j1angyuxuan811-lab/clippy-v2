@@ -66,14 +66,12 @@ func (m *Monitor) checkText() {
 }
 
 func (m *Monitor) checkImage() bool {
-	// Check clipboard info for image types
+	// Check clipboard info for image types using osascript
 	infoOut, err := exec.Command("osascript", "-e", "clipboard info as text").Output()
 	if err != nil {
-		log.Printf("⚠️ clipboard info error: %v", err)
 		return false
 	}
 	info := string(infoOut)
-	log.Printf("🔍 clipboard info: %s", info[:min(60, len(info))])
 
 	hasImage := strings.Contains(info, "PNGf") ||
 		strings.Contains(info, "TIFF") ||
@@ -81,13 +79,12 @@ func (m *Monitor) checkImage() bool {
 		strings.Contains(info, "GIFf") ||
 		strings.Contains(info, "8BPS")
 	if !hasImage {
-		log.Printf("🔍 no image in clipboard")
 		return false
 	}
 
-	log.Printf("🔍 image detected, exporting...")
+	log.Printf("🖼️ Image detected in clipboard")
 
-	// Export as PNG
+	// Export as PNG using osascript
 	tmpFile := filepath.Join(m.imagesDir, fmt.Sprintf("clip_%d.png", time.Now().UnixNano()))
 	exportScript := fmt.Sprintf(`set theData to the clipboard as «class PNGf»
 set f to open for access POSIX file "%s" with write permission
@@ -95,9 +92,8 @@ set eof f to 0
 write theData to f
 close access f`, tmpFile)
 
-	out, err := exec.Command("osascript", "-e", exportScript).CombinedOutput()
-	log.Printf("🔍 export result: err=%v, out=%s", err, string(out))
-	if err != nil || len(out) > 0 {
+	_, err = exec.Command("osascript", "-e", exportScript).CombinedOutput()
+	if err != nil {
 		// Fallback to TIFF
 		_ = os.Remove(tmpFile)
 		tmpFile = filepath.Join(m.imagesDir, fmt.Sprintf("clip_%d.tiff", time.Now().UnixNano()))
@@ -106,21 +102,21 @@ set f to open for access POSIX file "%s" with write permission
 set eof f to 0
 write theData to f
 close access f`, tmpFile)
-		out, err = exec.Command("osascript", "-e", exportScript).CombinedOutput()
-		if err != nil || len(out) > 0 {
+		_, err = exec.Command("osascript", "-e", exportScript).CombinedOutput()
+		if err != nil {
 			_ = os.Remove(tmpFile)
 			return false
 		}
 	}
 
-	// Check file size (max 5MB)
+	// Check file size (max 5MB, min 100 bytes)
 	finfo, err := os.Stat(tmpFile)
-	if err != nil || finfo.Size() > 5*1024*1024 || finfo.Size() == 0 {
+	if err != nil || finfo.Size() > 5*1024*1024 || finfo.Size() < 100 {
 		_ = os.Remove(tmpFile)
 		return false
 	}
 
-	// Dedup by content hash — only save if different from last image
+	// Dedup by content hash
 	hash := hashFile(tmpFile)
 	if hash == m.lastImageHash {
 		_ = os.Remove(tmpFile)

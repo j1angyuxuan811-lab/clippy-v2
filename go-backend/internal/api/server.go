@@ -2,8 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +52,7 @@ func (s *Server) routes(staticDir string) {
 	api := s.router.PathPrefix("/api").Subrouter()
 	api.HandleFunc("/clips", s.handleList).Methods("GET")
 	api.HandleFunc("/clips", s.handleCreate).Methods("POST")
+	api.HandleFunc("/clips/image", s.handleImageUpload).Methods("POST")
 	api.HandleFunc("/clips/{id}", s.handleDelete).Methods("DELETE")
 	api.HandleFunc("/clips/{id}/pin", s.handlePin).Methods("PUT")
 	api.HandleFunc("/clips/{id}/copy", s.handleCopy).Methods("POST")
@@ -115,6 +120,56 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(item)
 }
 
+func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
+	// Max 10MB
+	r.ParseMultipartForm(10 << 20)
+
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing image file", 400)
+		return
+	}
+	defer file.Close()
+
+	// Validate extension
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".gif" && ext != ".webp" {
+		http.Error(w, "unsupported image type", 400)
+		return
+	}
+
+	// Save with unique name
+	filename := fmt.Sprintf("clip_%d%s", time.Now().UnixNano(), ext)
+	dst := filepath.Join(s.imagesDir, filename)
+
+	out, err := os.Create(dst)
+	if err != nil {
+		http.Error(w, "failed to save image", 500)
+		return
+	}
+	defer out.Close()
+	io.Copy(out, file)
+
+	// Get file size for logging
+	info, _ := os.Stat(dst)
+	sizeKB := float64(info.Size()) / 1024
+
+	// Store in DB
+	content := "[图片]"
+	item, err := s.store.Create(content, "image", filename)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if item == nil {
+		json.NewEncoder(w).Encode(map[string]string{"status": "duplicate"})
+		return
+	}
+
+	log.Printf("🖼️ Image received: %s (%.1f KB)", filename, sizeKB)
+	json.NewEncoder(w).Encode(item)
+}
+
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(mux.Vars(r)["id"])
 	err := s.store.Delete(id)
@@ -122,7 +177,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
@@ -132,60 +187,66 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "toggled"})
 }
 
 func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(mux.Vars(r)["id"])
 	item, err := s.store.Get(id)
 	if err != nil {
-		http.Error(w, "not found", 404)
+		http.Error(w, err.Error(), 404)
 		return
 	}
-	_ = s.store.IncrementHot(id)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "ok",
-		"content": item.Content,
-	})
+	json.NewEncoder(w).Encode(item)
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	clips, err := s.store.List(1000)
+	clips, err := s.store.List(200)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	if clips == nil {
+		clips = []db.Item{}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", "attachment; filename=clippy-export.json")
 	json.NewEncoder(w).Encode(clips)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":    "ok",
-		"timestamp": time.Now().Format(time.RFC3339),
-	})
-}
-
 func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	filename := mux.Vars(r)["filename"]
-	// Prevent path traversal
-	if strings.Contains(filename, "..") || strings.Contains(filename, "/") {
-		http.Error(w, "invalid filename", 400)
+	path := filepath.Join(s.imagesDir, filename)
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		http.Error(w, "not found", 404)
 		return
 	}
-	http.ServeFile(w, r, s.imagesDir+"/"+filename)
+
+	http.ServeFile(w, r, path)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func detectType(content string) string {
-	if strings.HasPrefix(content, "http://") || strings.HasPrefix(content, "https://") {
+	lower := strings.ToLower(strings.TrimSpace(content))
+
+	// URL
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
 		return "link"
 	}
-	keywords := []string{"func ", "function ", "class ", "import ", "const ", "var ", "def ", "SELECT ", "FROM ", "public ", "private ", "async "}
-	for _, kw := range keywords {
-		if strings.Contains(content, kw) {
+
+	// Code indicators
+	codeIndicators := []string{"func ", "function ", "def ", "class ", "import ", "package ",
+		"const ", "let ", "var ", "{", "}", "//", "/*", "*/", "=>"}
+	for _, ind := range codeIndicators {
+		if strings.Contains(lower, ind) {
 			return "code"
 		}
 	}
+
 	return "text"
 }

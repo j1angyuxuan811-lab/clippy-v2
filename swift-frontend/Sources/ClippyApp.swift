@@ -13,15 +13,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var clickLocalMonitor: Any?
     var hotkeyGlobalMonitor: Any?
     var hotkeyLocalMonitor: Any?
+    var clipboardMonitor: Timer?
+    var lastImageHash: Int = 0
 
     private let backendURL: URL = {
         let appBundleURL = Bundle.main.bundleURL
-        return appBundleURL.appendingPathComponent("Contents/Resources/clippy-server")
+        return appBundleURL.appendingPathComponent("Contents/Resources/go-backend/clippy-server")
     }()
 
     private var uiDir: URL {
         if let resourcesPath = Bundle.main.resourcePath {
-            return URL(fileURLWithPath: resourcesPath)
+            return URL(fileURLWithPath: resourcesPath).appendingPathComponent("ui-prototype")
         }
         return URL(fileURLWithPath: "/Users/qq/workspace/clippy-v2/ui-prototype")
     }
@@ -39,15 +41,107 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupPanel()
         setupGlobalHotkey()
+        startClipboardMonitor()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopClipboardMonitor()
         stopBackend()
         cleanupMonitors()
     }
 
-    func applicationDidResignActive(_ notification: Notification) {
-        // Don't auto-hide when clicking outside (we handle it manually)
+    // ── Clipboard Image Monitor ──
+    func startClipboardMonitor() {
+        clipboardMonitor = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.checkClipboardForImage()
+        }
+        print("📋 Clipboard image monitor started (0.5s interval)")
+    }
+
+    func stopClipboardMonitor() {
+        clipboardMonitor?.invalidate()
+        clipboardMonitor = nil
+    }
+
+    private func checkClipboardForImage() {
+        let pasteboard = NSPasteboard.general
+
+        guard let types = pasteboard.types else { return }
+        guard types.contains(.png) || types.contains(.tiff) else { return }
+
+        guard let imageData = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) else { return }
+
+        // Dedup by hash
+        let hash = imageData.hashValue
+        if hash == lastImageHash { return }
+        lastImageHash = hash
+
+        // Convert TIFF to PNG if needed
+        var pngData = imageData
+        if pasteboard.data(forType: .tiff) != nil && pasteboard.data(forType: .png) == nil {
+            if let bitmap = NSBitmapImageRep(data: imageData),
+               let converted = bitmap.representation(using: .png, properties: [:]) {
+                pngData = converted
+            }
+        }
+
+        // Save to temp file
+        let tempDir = FileManager.default.temporaryDirectory
+        let tempFile = tempDir.appendingPathComponent("clippy_upload_\(UUID().uuidString).png")
+        do {
+            try pngData.write(to: tempFile)
+        } catch {
+            print("❌ Failed to save temp image: \(error)")
+            return
+        }
+
+        // Upload to Go backend
+        uploadImage(fileURL: tempFile)
+
+        // Clean up temp file after a delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            try? FileManager.default.removeItem(at: tempFile)
+        }
+
+        print("📤 Image detected on clipboard, uploading...")
+    }
+
+    private func uploadImage(fileURL: URL) {
+        let url = URL(string: "http://localhost:5100/api/clips/image")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+
+        // Add file
+        let filename = fileURL.lastPathComponent
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"image\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/png\r\n\r\n".data(using: .utf8)!)
+
+        do {
+            let fileData = try Data(contentsOf: fileURL)
+            body.append(fileData)
+        } catch {
+            print("❌ Failed to read temp file: \(error)")
+            return
+        }
+
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                print("❌ Upload failed: \(error)")
+                return
+            }
+            if let data = data, let resp = String(data: data, encoding: .utf8) {
+                print("✅ Image uploaded: \(resp)")
+            }
+        }.resume()
     }
 
     // ── Backend ──
@@ -109,7 +203,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
-            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.titled, .fullSizeContentView],
             backing: .buffered,
             defer: true
         )

@@ -21,8 +21,8 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 
 # Copy Swift binary
-cp "$ROOT/swift-frontend/.build/debug/ClippyApp" "$APP/Contents/MacOS/Clippy"
-
+cp -f "$ROOT/swift-frontend/.build/debug/Clippy" "$APP/Contents/MacOS/Clippy"
+chmod +x "$APP/Contents/MacOS/Clippy"
 # Copy Go backend binary
 mkdir -p "$APP/Contents/Resources/go-backend"
 cp "$GO_BIN/clippy-server" "$APP/Contents/Resources/go-backend/"
