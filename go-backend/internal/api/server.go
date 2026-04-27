@@ -217,6 +217,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	filename := mux.Vars(r)["filename"]
+	// Strip any directory prefix (e.g., "data/images/xxx.png" -> "xxx.png")
+	filename = filepath.Base(filename)
 	path := filepath.Join(s.imagesDir, filename)
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
