@@ -1,0 +1,28 @@
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+build/
+*.app/
+*.db
+
+# Go
+go-backend/clippy-backend
+
+# Swift
+swift-frontend/.build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
