@@ -1,11 +1,11 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"clippy-backend/internal/api"
@@ -14,68 +14,48 @@ import (
 )
 
 func main() {
-	// Command line flags
-	addr := flag.String("addr", ":5100", "HTTP server address")
-	dbPath := flag.String("db", "clippy.db", "SQLite database path")
+	port := flag.String("port", "5100", "API server port")
+	dataDir := flag.String("data", "./data", "Data directory")
 	staticDir := flag.String("static", "./ui-prototype", "Static files directory")
+	imagesDir := flag.String("images", "./data/images", "Images directory")
+	launchctl := flag.Bool("launchctl", false, "Run in launchctl mode (no stdin)")
 	flag.Parse()
 
-	// Setup logging
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Starting Clippy v2 Backend...")
+	// Suppress unused variable warning
+	_ = *launchctl
 
-	// Initialize database
-	store, err := db.NewStore(*dbPath)
+	_ = os.MkdirAll(*dataDir, 0755)
+	_ = os.MkdirAll(*imagesDir, 0755)
+
+	absDataDir, _ := filepath.Abs(*dataDir)
+	dbPath := filepath.Join(absDataDir, "clippy.db")
+
+	store, err := db.New(dbPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		log.Fatalf("Failed to open database: %v", err)
 	}
-	defer store.Close()
 
-	// Initialize API server
-	server := api.NewServer(store, *addr, *staticDir)
+	// Startup cleanup
+	store.CleanupOrphanImages(*imagesDir)
+	store.EnforceImageLimit(*imagesDir, 200*1024*1024) // 200MB limit
 
-	// Initialize clipboard monitor
-	monitor := clipboard.NewMonitor(func(content string) {
-		item, err := store.AddItem(content)
-		if err != nil {
-			log.Printf("Failed to add clipboard item: %v", err)
-			return
-		}
-		if item != nil {
-			log.Printf("New clipboard item #%d: %.50s...", item.ID, item.Content)
-		}
-	})
+	monitor := clipboard.New(store, *imagesDir)
+	go monitor.Start()
 
-	// Setup graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	server := api.New(store, *staticDir, *imagesDir)
 
 	go func() {
-		sig := <-sigCh
-		log.Printf("Received signal: %v", sig)
-		cancel()
-		monitor.Stop()
-		server.Shutdown()
-	}()
-
-	// Start services
-	monitor.Start()
-
-	// Start HTTP server
-	go func() {
-		if err := server.Start(); err != nil && err.Error() != "http: Server closed" {
+		if err := server.ListenAndServe(":" + *port); err != nil {
 			log.Printf("Server error: %v", err)
-			cancel()
 		}
 	}()
 
-	log.Printf("Clippy v2 Backend running on %s", *addr)
-	log.Println("Press Ctrl+C to stop")
+	log.Printf("✅ Clippy backend started on port %s", *port)
 
-	// Wait for shutdown
-	<-ctx.Done()
-	log.Println("Shutting down...")
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	log.Println("👋 Shutting down...")
+	store.Close()
 }

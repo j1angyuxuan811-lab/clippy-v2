@@ -2,197 +2,272 @@ package db
 
 import (
 	"database/sql"
-	"fmt"
 	"log"
-	"time"
+	"os"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// Item represents a clipboard item in the database
 type Item struct {
-	ID          int64     `json:"id"`
-	Content     string    `json:"content"`
-	ContentType string    `json:"content_type"`
-	Pinned      bool      `json:"pinned"`
-	Tags        string    `json:"tags"`
-	CreatedAt   time.Time `json:"created_at"`
-	AccessCount int       `json:"access_count"`
+	ID          int    `json:"id"`
+	Content     string `json:"content"`
+	ContentType string `json:"content_type"`
+	ImagePath   string `json:"image_path,omitempty"`
+	Tags        string `json:"tags"`
+	IsPinned    bool   `json:"is_pinned"`
+	HotCount    int    `json:"hot_count"`
+	CreatedAt   string `json:"created_at"`
 }
 
-// Store manages clipboard items in SQLite
 type Store struct {
-	db         *sql.DB
-	maxItems   int
+	db *sql.DB
 }
 
-// NewStore creates a new database store
-func NewStore(dbPath string) (*Store, error) {
+func New(dbPath string) (*Store, error) {
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	// Create table if not exists
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS items (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			content TEXT NOT NULL,
-			content_type TEXT DEFAULT 'text',
-			pinned INTEGER DEFAULT 0,
-			tags TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			access_count INTEGER DEFAULT 0
-		);
-		CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at);
-		CREATE INDEX IF NOT EXISTS idx_items_pinned ON items(pinned);
-	`)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create table: %w", err)
-	}
-
-	log.Println("Database initialized successfully")
-	return &Store{db: db, maxItems: 1000}, nil
-}
-
-// Close closes the database connection
-func (s *Store) Close() error {
-	return s.db.Close()
-}
-
-// AddItem adds a new clipboard item
-func (s *Store) AddItem(content string) (*Item, error) {
-	// Check for duplicates (same content in last 5 seconds)
-	var count int
-	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM items WHERE content = ? AND created_at > datetime('now', '-5 seconds')",
-		content,
-	).Scan(&count)
 	if err != nil {
 		return nil, err
 	}
-	if count > 0 {
-		return nil, nil // Duplicate, skip
-	}
 
-	// Insert new item
-	result, err := s.db.Exec(
-		"INSERT INTO items (content, content_type) VALUES (?, 'text')",
-		content,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to insert item: %w", err)
-	}
-
-	id, _ := result.LastInsertId()
-
-	// Cleanup old items if exceeding max (keep pinned items)
-	if err := s.cleanup(); err != nil {
-		log.Printf("Warning: cleanup failed: %v", err)
-	}
-
-	return s.GetItem(id)
+	s := &Store{db: db}
+	s.init()
+	return s, nil
 }
 
-// GetItem retrieves a single item by ID
-func (s *Store) GetItem(id int64) (*Item, error) {
+func (s *Store) init() {
+	query := `CREATE TABLE IF NOT EXISTS clips (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		content     TEXT NOT NULL,
+		content_type TEXT DEFAULT 'text',
+		image_path  TEXT DEFAULT '',
+		tags        TEXT DEFAULT '',
+		is_pinned   BOOLEAN DEFAULT 0,
+		hot_count   INTEGER DEFAULT 0,
+		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`
+	_, _ = s.db.Exec(query)
+
+	// Migration: add image_path column if missing
+	_, _ = s.db.Exec("ALTER TABLE clips ADD COLUMN image_path TEXT DEFAULT ''")
+}
+
+func (s *Store) Create(content string, contentType string, imagePath string) (*Item, error) {
+	// Check duplicate (last 10)
+	var count int
+	s.db.QueryRow("SELECT COUNT(*) FROM clips WHERE content = ? AND created_at > datetime('now', '-10 seconds')", content).Scan(&count)
+	if count > 0 {
+		return nil, nil
+	}
+
+	res, err := s.db.Exec(
+		"INSERT INTO clips (content, content_type, image_path) VALUES (?, ?, ?)",
+		content, contentType, imagePath,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+
+	// Auto cleanup
+	s.cleanup()
+
+	return s.Get(int(id))
+}
+
+func (s *Store) Get(id int) (*Item, error) {
 	item := &Item{}
 	err := s.db.QueryRow(
-		"SELECT id, content, content_type, pinned, tags, created_at, access_count FROM items WHERE id = ?",
-		id,
-	).Scan(&item.ID, &item.Content, &item.ContentType, &item.Pinned, &item.Tags, &item.CreatedAt, &item.AccessCount)
+		"SELECT id, content, content_type, COALESCE(image_path,''), COALESCE(tags,''), is_pinned, hot_count, created_at FROM clips WHERE id = ?", id,
+	).Scan(&item.ID, &item.Content, &item.ContentType, &item.ImagePath, &item.Tags, &item.IsPinned, &item.HotCount, &item.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return item, nil
 }
 
-// ListItems returns clipboard items with optional search
-func (s *Store) ListItems(search string, limit int) ([]*Item, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-
-	var rows *sql.Rows
-	var err error
-
-	if search != "" {
-		rows, err = s.db.Query(
-			"SELECT id, content, content_type, pinned, tags, created_at, access_count FROM items WHERE content LIKE ? ORDER BY pinned DESC, created_at DESC LIMIT ?",
-			"%"+search+"%",
-			limit,
-		)
-	} else {
-		rows, err = s.db.Query(
-			"SELECT id, content, content_type, pinned, tags, created_at, access_count FROM items ORDER BY pinned DESC, created_at DESC LIMIT ?",
-			limit,
-		)
-	}
+func (s *Store) List(limit int) ([]Item, error) {
+	rows, err := s.db.Query(
+		"SELECT id, content, content_type, COALESCE(image_path,''), COALESCE(tags,''), is_pinned, hot_count, created_at FROM clips ORDER BY is_pinned DESC, created_at DESC LIMIT ?", limit,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var items []*Item
+	var items []Item
 	for rows.Next() {
-		item := &Item{}
-		err := rows.Scan(&item.ID, &item.Content, &item.ContentType, &item.Pinned, &item.Tags, &item.CreatedAt, &item.AccessCount)
+		var item Item
+		err := rows.Scan(&item.ID, &item.Content, &item.ContentType, &item.ImagePath, &item.Tags, &item.IsPinned, &item.HotCount, &item.CreatedAt)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		items = append(items, item)
 	}
 	return items, nil
 }
 
-// TogglePin toggles the pinned status of an item
-func (s *Store) TogglePin(id int64) (*Item, error) {
-	_, err := s.db.Exec(
-		"UPDATE items SET pinned = CASE WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?",
-		id,
+func (s *Store) Delete(id int) error {
+	// Get image path before deleting
+	var imagePath string
+	_ = s.db.QueryRow("SELECT COALESCE(image_path,'') FROM clips WHERE id = ?", id).Scan(&imagePath)
+
+	_, err := s.db.Exec("DELETE FROM clips WHERE id = ?", id)
+
+	// Delete associated image file
+	if imagePath != "" {
+		_ = os.Remove(imagePath)
+	}
+
+	return err
+}
+
+func (s *Store) TogglePin(id int) error {
+	_, err := s.db.Exec("UPDATE clips SET is_pinned = NOT is_pinned WHERE id = ?", id)
+	return err
+}
+
+func (s *Store) IncrementHot(id int) error {
+	_, err := s.db.Exec("UPDATE clips SET hot_count = hot_count + 1 WHERE id = ?", id)
+	return err
+}
+
+func (s *Store) Search(query string) ([]Item, error) {
+	rows, err := s.db.Query(
+		"SELECT id, content, content_type, COALESCE(image_path,''), COALESCE(tags,''), is_pinned, hot_count, created_at FROM clips WHERE content LIKE ? ORDER BY is_pinned DESC, created_at DESC LIMIT 50",
+		"%"+query+"%",
 	)
 	if err != nil {
 		return nil, err
 	}
-	return s.GetItem(id)
-}
+	defer rows.Close()
 
-// DeleteItem removes an item
-func (s *Store) DeleteItem(id int64) error {
-	result, err := s.db.Exec("DELETE FROM items WHERE id = ?", id)
-	if err != nil {
-		return err
+	var items []Item
+	for rows.Next() {
+		var item Item
+		err := rows.Scan(&item.ID, &item.Content, &item.ContentType, &item.ImagePath, &item.Tags, &item.IsPinned, &item.HotCount, &item.CreatedAt)
+		if err != nil {
+			continue
+		}
+		items = append(items, item)
 	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("item not found")
-	}
-	return nil
+	return items, nil
 }
 
-// IncrementAccessCount increments the access counter for an item
-func (s *Store) IncrementAccessCount(id int64) error {
-	_, err := s.db.Exec("UPDATE items SET access_count = access_count + 1 WHERE id = ?", id)
-	return err
-}
-
-// cleanup removes old non-pinned items if exceeding maxItems
-func (s *Store) cleanup() error {
+// Delete old unpinned items (keep maxItems)
+func (s *Store) cleanup() {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM items").Scan(&count)
-	if err != nil {
-		return err
+	s.db.QueryRow("SELECT COUNT(*) FROM clips").Scan(&count)
+	if count <= 1000 {
+		return
 	}
 
-	if count > s.maxItems {
-		excess := count - s.maxItems
-		_, err = s.db.Exec(`
-			DELETE FROM items WHERE id IN (
-				SELECT id FROM items WHERE pinned = 0 ORDER BY created_at ASC LIMIT ?
-			)
-		`, excess)
-		return err
+	// Delete oldest unpinned items
+	rows, _ := s.db.Query(
+		"SELECT id, COALESCE(image_path,'') FROM clips WHERE is_pinned = 0 ORDER BY created_at ASC LIMIT ?",
+		count-1000,
+	)
+	defer rows.Close()
+
+	var ids []int
+	var paths []string
+	for rows.Next() {
+		var id int
+		var path string
+		rows.Scan(&id, &path)
+		ids = append(ids, id)
+		if path != "" {
+			paths = append(paths, path)
+		}
 	}
-	return nil
+
+	for _, id := range ids {
+		s.db.Exec("DELETE FROM clips WHERE id = ?", id)
+	}
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
+
+	log.Printf("🧹 Cleaned up %d old items", len(ids))
+}
+
+// Clean up orphan images (images on disk not referenced in DB)
+func (s *Store) CleanupOrphanImages(imagesDir string) {
+	if imagesDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(imagesDir)
+	if err != nil {
+		return
+	}
+
+	// Get all referenced image paths
+	rows, _ := s.db.Query("SELECT DISTINCT image_path FROM clips WHERE image_path != ''")
+	defer rows.Close()
+
+	referenced := make(map[string]bool)
+	for rows.Next() {
+		var path string
+		rows.Scan(&path)
+		referenced[path] = true
+	}
+
+	cleaned := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fullPath := filepath.Join(imagesDir, entry.Name())
+		relPath := filepath.Join("data", "images", entry.Name())
+		if !referenced[relPath] {
+			_ = os.Remove(fullPath)
+			cleaned++
+		}
+	}
+	if cleaned > 0 {
+		log.Printf("🧹 Cleaned %d orphan images", cleaned)
+	}
+}
+
+// Total image size
+func (s *Store) ImageDirSize(imagesDir string) int64 {
+	var size int64
+	_ = filepath.Walk(imagesDir, func(path string, info os.FileInfo, err error) error {
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size
+}
+
+// Evict oldest images if total exceeds limit (200MB)
+func (s *Store) EnforceImageLimit(imagesDir string, maxBytes int64) {
+	size := s.ImageDirSize(imagesDir)
+	if size <= maxBytes {
+		return
+	}
+
+	rows, _ := s.db.Query(
+		"SELECT id, COALESCE(image_path,'') FROM clips WHERE image_path != '' AND is_pinned = 0 ORDER BY created_at ASC",
+	)
+	defer rows.Close()
+
+	for rows.Next() && size > maxBytes {
+		var id int
+		var path string
+		rows.Scan(&id, &path)
+		if path != "" {
+			if info, err := os.Stat(path); err == nil {
+				_ = os.Remove(path)
+				size -= info.Size()
+				s.db.Exec("UPDATE clips SET image_path = '' WHERE id = ?", id)
+				log.Printf("🗑️ Evicted image: %s", filepath.Base(path))
+			}
+		}
+	}
+}
+
+func (s *Store) Close() {
+	_ = s.db.Close()
 }

@@ -11,6 +11,8 @@ bin/
 
 # Go
 go-backend/clippy-backend
+go-backend/clippy-server
+go-backend/data/
 
 # Swift
 swift-frontend/.build/
