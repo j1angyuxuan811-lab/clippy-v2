@@ -2,6 +2,8 @@
 
 macOS 智能剪切板管理器。Go 后端 + Swift 菜单栏 + 液态玻璃 UI。
 
+![Clippy Demo](screenshots/demo.gif)
+
 ![Clippy UI](screenshots/main-ui.png)
 
 ---
