@@ -92,9 +92,35 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		clips = []db.Item{}
 	}
 
+	// Add absolute image paths for WebView access
+	type ClipJSON struct {
+		ID           int    `json:"id"`
+		Content      string `json:"content"`
+		ContentType  string `json:"content_type"`
+		ImagePath    string `json:"image_path,omitempty"`
+		ImageAbsPath string `json:"image_abs_path,omitempty"`
+		Tags         string `json:"tags"`
+		IsPinned     bool   `json:"pinned"`
+		HotCount     int    `json:"hot_count"`
+		CreatedAt    string `json:"created_at"`
+	}
+	result := make([]ClipJSON, 0, len(clips))
+	for _, c := range clips {
+		cj := ClipJSON{
+			ID: c.ID, Content: c.Content, ContentType: c.ContentType,
+			ImagePath: c.ImagePath, Tags: c.Tags, IsPinned: c.IsPinned,
+			HotCount: c.HotCount, CreatedAt: c.CreatedAt,
+		}
+		if c.ImagePath != "" {
+			absPath := filepath.Join(s.imagesDir, filepath.Base(c.ImagePath))
+			cj.ImageAbsPath = absPath
+		}
+		result = append(result, cj)
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"clips": clips,
-		"count": len(clips),
+		"clips": result,
+		"count": len(result),
 	})
 }
 
