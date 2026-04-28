@@ -55,15 +55,18 @@ func (s *Store) init() {
 }
 
 func (s *Store) Create(content string, contentType string, imagePath string) (*Item, error) {
-	// Check duplicate (last 10 seconds) — for images, also check path
-	var count int
+	// Permanent dedup: if content already exists, update its timestamp instead of inserting
+	var existingID int
 	if imagePath != "" {
-		s.db.QueryRow("SELECT COUNT(*) FROM items WHERE image_path = ? AND created_at > datetime('now', '-10 seconds')", imagePath).Scan(&count)
+		s.db.QueryRow("SELECT id FROM items WHERE image_path = ? LIMIT 1", imagePath).Scan(&existingID)
 	} else {
-		s.db.QueryRow("SELECT COUNT(*) FROM items WHERE content = ? AND created_at > datetime('now', '-10 seconds')", content).Scan(&count)
+		s.db.QueryRow("SELECT id FROM items WHERE content = ? LIMIT 1", content).Scan(&existingID)
 	}
-	if count > 0 {
-		return nil, nil
+
+	if existingID > 0 {
+		// Update timestamp and move to top
+		s.db.Exec("UPDATE items SET created_at = datetime('now') WHERE id = ?", existingID)
+		return s.Get(existingID)
 	}
 
 	res, err := s.db.Exec(
